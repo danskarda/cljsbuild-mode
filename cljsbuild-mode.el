@@ -40,13 +40,11 @@
 ;; 1. M-x cljsbuild-auto
 ;; 2. Enjoy!
 ;;
-;; Alternatively, if you prefer to work from a terminal:
-;;
-;; 1. Start a terminal with M-x term or M-x multi-term
-;; 2. Run 'lein cljsbuild auto' in it
-;; 3. Start cljsbuild-mode in the terminal buffer with M-x cljsbuild-mode
+;; This version of cljsbuild-mode is based on compilation-mode for Emacs
+;; You can use C-x ` hotkeys to advance to errors etc.
 
 (require 'ansi-color)
+(require 'compile)
 
 (defgroup cljsbuild-mode nil
   "A helper mode for running 'lein cljsbuild' within Emacs."
@@ -54,17 +52,22 @@
   :group 'applications)
 
 ;;;###autoload
-(define-minor-mode cljsbuild-mode
+(define-derived-mode cljsbuild-mode compilation-mode "CljsBuild"
   "ClojureScript Build mode"
   :init-value nil
-  :lighter " Cljs-Build"
   :group 'cljsbuild-mode
-  :after-hook (cljsbuild-init-mode))
+
+  (make-variable-buffer-local 'compilation-error-regexp-alist)
+  (setq compilation-error-regexp-alist cljsbuild-error-regexp-alist)
+  (add-hook 'compilation-filter-hook 'cljsbuild-compilation-filter nil t))
 
 (defcustom cljsbuild-verbose t
   "When non-nil, provide progress feedback in the minibuffer."
   :type 'boolean
   :group 'cljsbuild-mode)
+
+(defcustom cljsbuild-show-buffer-function 'display-buffer
+  "A function to use to show a compilation buffer")
 
 (defcustom cljsbuild-show-buffer-on-failure t
   "When non-nil, pop up the build buffer when failures are seen."
@@ -81,15 +84,29 @@
   :type 'boolean
   :group 'cljsbuild-mode)
 
+(defcustom cljsbuild-compilation-command "lein cljsbuild auto"
+  "Default cljsbuild compilation command"
+  :type 'boolean
+  :group 'cljsbuild-mode)
+
+(defvar cljsbuild-error-regexp-alist
+  '(("^\\(ERROR\\): .* at line \\(\\([0-9]+\\) \\(.*\\)\\)$"
+     4 3 nil 2 2)
+    ("^\\(WARNING\\): .* at line \\(\\([0-9]+\\) \\(.*\\)$\\)"
+     4 3 nil 1 2))
+  "Error matching expression for `compilation-error-regexp-alist'")
+
 (defun cljsbuild-message (format-string &rest args)
   "Pass FORMAT-STRING and ARGS through to `message' if `cljsbuild-verbose' is non-nil."
   (when cljsbuild-verbose
     (apply #'message format-string args)))
 
-(defun cljsbuild-on-buffer-change
-  (beginning end len)
-  (let ((inserted (buffer-substring-no-properties beginning end))
-        (buffer-visible (get-buffer-window (buffer-name) 'visible)))
+(defun cljsbuild-compilation-filter (&rest args)
+  (let* ((inhibit-read-only t)
+	 (begin		    compilation-filter-start)
+ 	 (inserted	    (buffer-substring-no-properties begin (point)))
+	 (buffer-visible    (get-buffer-window (buffer-name) 'visible)))
+    (ansi-color-apply-on-region begin (point))
     (cond ((string-match "^Successfully compiled" inserted)
            (cljsbuild-message "Cljsbuild compilation success")
            (when cljsbuild-hide-buffer-on-success
@@ -99,49 +116,31 @@
            (cljsbuild-message "Cljsbuild compilation failure")
            (when (and (not buffer-visible) cljsbuild-show-buffer-on-failure)
              ;; if the compilation buffer is not visible, shows it
-             (switch-to-buffer-other-window (buffer-name) t)))
+             (funcall cljsbuild-show-buffer-function (buffer-name))))
           ((string-match "^WARNING:" inserted)
            (cljsbuild-message "Cljsbuild compilation warning")
            (when (and (not buffer-visible) cljsbuild-show-buffer-on-warnings)
-             (switch-to-buffer-other-window (buffer-name) t))))))
+             (funcall cljsbuild-show-buffer-function (buffer-name) t))))))
 
-(defun cljsbuild-init-mode
-  ()
-    "Initializes the minor mode and registers a change hook on the
-compilation buffer"
-  (remove-hook 'after-change-functions 'cljsbuild-on-buffer-change)
-  (add-hook 'after-change-functions 'cljsbuild-on-buffer-change nil t))
+(defun cljsbuild-run (command)
+  (let ((default-directory (or (locate-dominating-file default-directory "project.clj")
+			       (error "Cannot locate project.clj"))))
+    (compilation-start command 'cljsbuild-mode
+		       nil compilation-highlight-regexp)))
 
-(defun cljsbuild--insertion-filter (proc string)
-  "When PROC sends STRING, apply ansi color codes and insert into buffer."
-  (with-current-buffer (process-buffer proc)
-    (let ((moving (= (point) (process-mark proc))))
-      (save-excursion
-	(goto-char (process-mark proc))
-	(insert (ansi-color-apply string))
-	(set-marker (process-mark proc) (point)))
-      (when moving
-        (goto-char (process-mark proc))))))
+(defun cljsbuild-compile (command)
+  (interactive (list
+		(if current-prefix-arg
+		    (compilation-read-command cljsbuild-compilation-command)
+		  cljsbuild-compilation-command)))
+  (cljsbuild-run command)
+  (setq cljsbuild-compilation-command command))
 
-;;;###autoload
-(defun cljsbuild-auto ()
-  "Run \"lein cljsbuild auto\" in a background buffer."
+(defun cljsbuild-clean ()
   (interactive)
-  (unless (locate-dominating-file default-directory "project.clj")
-    (error "Not inside a leiningen project"))
-  (with-current-buffer (get-buffer-create "*cljsbuild*")
-    (when (get-buffer-process (current-buffer))
-      (error "Lein cljsbuild is already running"))
-    (buffer-disable-undo)
-    (let* ((proc (start-process "cljsbuild"
-                                (current-buffer)
-                                "lein" "cljsbuild" "auto")))
-      (cljsbuild-mode)
-      ;; Colorize output
-      (set-process-filter proc 'cljsbuild--insertion-filter)
-      (font-lock-mode)
-      (message "Started cljsbuild."))))
+  (cljbsuild-run "lein cljsbuild clean"))
 
+(defalias 'cljsbuild-auto 'cljsbuild-compile)
 
 (provide 'cljsbuild-mode)
 
